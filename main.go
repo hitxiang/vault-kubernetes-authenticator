@@ -35,17 +35,20 @@ func main() {
 		vaultAddr = "https://127.0.0.1:8200"
 	}
 
-	vaultCaPem = os.Getenv("VAULT_CAPEM")
-	vaultCaCert = os.Getenv("VAULT_CACERT")
-	vaultCaPath = os.Getenv("VAULT_CAPATH")
-	vaultServerName = os.Getenv("VAULT_TLS_SERVER_NAME")
+	isHTTPS := strings.HasPrefix(vaultAddr, "https://")
+	if isHTTPS {
+		vaultCaPem = os.Getenv("VAULT_CAPEM")
+		vaultCaCert = os.Getenv("VAULT_CACERT")
+		vaultCaPath = os.Getenv("VAULT_CAPATH")
+		vaultServerName = os.Getenv("VAULT_TLS_SERVER_NAME")
 
-	if s := os.Getenv("VAULT_SKIP_VERIFY"); s != "" {
-		b, err := strconv.ParseBool(s)
-		if err != nil {
-			log.Fatal(err)
+		if s := os.Getenv("VAULT_SKIP_VERIFY"); s != "" {
+			b, err := strconv.ParseBool(s)
+			if err != nil {
+				log.Fatal(err)
+			}
+			vaultSkipVerify = b
 		}
-		vaultSkipVerify = b
 	}
 
 	vaultK8SMountPath = os.Getenv("VAULT_K8S_MOUNT_PATH")
@@ -75,7 +78,7 @@ func main() {
 	}
 
 	// Authenticate to vault using the jwt token
-	token, err := authenticate(role, jwt)
+	token, err := authenticate(role, jwt, isHTTPS)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -99,32 +102,35 @@ func readJwtToken(path string) (string, error) {
 	return string(bytes.TrimSpace(data)), nil
 }
 
-func authenticate(role, jwt string) (string, error) {
-	// Setup the TLS (especially required for custom CAs)
-	rootCAs, err := rootCAs()
-	if err != nil {
-		return "", err
-	}
+func authenticate(role, jwt string, isHTTPS bool) (string, error) {
+	var transport *http.Transport = nil
+	if isHTTPS {
+		// Setup the TLS (especially required for custom CAs)
+		rootCAs, err := rootCAs()
+		if err != nil {
+			return "", err
+		}
 
-	tlsClientConfig := &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		RootCAs:    rootCAs,
-	}
+		tlsClientConfig := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			RootCAs:    rootCAs,
+		}
 
-	if vaultSkipVerify {
-		tlsClientConfig.InsecureSkipVerify = true
-	}
+		if vaultSkipVerify {
+			tlsClientConfig.InsecureSkipVerify = true
+		}
 
-	if vaultServerName != "" {
-		tlsClientConfig.ServerName = vaultServerName
-	}
+		if vaultServerName != "" {
+			tlsClientConfig.ServerName = vaultServerName
+		}
 
-	transport := &http.Transport{
-		TLSClientConfig: tlsClientConfig,
-	}
+		transport = &http.Transport{
+			TLSClientConfig: tlsClientConfig,
+		}
 
-	if err := http2.ConfigureTransport(transport); err != nil {
-		return "", errors.New("failed to configure http2")
+		if err = http2.ConfigureTransport(transport); err != nil {
+			return "", errors.New("failed to configure http2")
+		}
 	}
 
 	client := &http.Client{
@@ -149,8 +155,8 @@ func authenticate(role, jwt string) (string, error) {
 	if resp.StatusCode != 200 {
 		var b bytes.Buffer
 		io.Copy(&b, resp.Body)
-		return "", fmt.Errorf("failed to get successful response: %#v, %s",
-			resp, b.String())
+		return "", fmt.Errorf("failed to get successful response: %#v, %s, %v",
+			resp, b.String(), body)
 	}
 
 	var s struct {
